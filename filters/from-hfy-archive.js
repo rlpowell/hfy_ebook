@@ -19,6 +19,10 @@ UriCache.prototype.uriToId = function(uri)
     return 'HFYA_' + tokens.slice(tokens.length-2, tokens.length).join('_');
 };
 
+function msleep(n) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, n);
+}
+
 UriCache.prototype.get = function(params, callback)
 {
     var id = this.uriToId(params.chap.src);
@@ -33,8 +37,30 @@ UriCache.prototype.get = function(params, callback)
         return;
     }
 
-    request({ uri: params.chap.src }, function(parmas, callback, uri_cache) { return function(error, response, body)
+    request({ uri: params.chap.src, headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/51.0.2704.103 Safari/537.36' } }, function(parmas, callback, uri_cache) { return function(error, response, body)
     {
+        if(!response)
+        {
+            console.log("archive not ready yet: " + params.chap.id);
+            uri_cache.get(params, callback);
+            msleep(100);
+            return;
+        }
+
+        if(response.statusCode === 429)
+        {
+            console.log("archive waiting " + global.backoff + "ms for: " + params.chap.id);
+            console.log(response.request.uri.href);
+            console.log(response);
+            global.backoff = global.backoff * 2;
+            global.backoff = Math.min(global.backoff, 21600000);
+            msleep(global.backoff);
+            uri_cache.get(params, callback);
+            return;
+        }
+
+        global.backoff = 1000;
+
         if(response.statusCode === 503)
         {
             console.log('[\033[91mRetrying\033[0m] ' + params.chap.id);

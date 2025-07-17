@@ -1,7 +1,16 @@
 import praw
+import sys
 import requests
+import re
+import copy
 
 from lxml import etree
+
+def slugify(text):
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text
 
 REDDIT_CLIENT_ID='CLIENT_ID_HERE'
 REDDIT_CLIENT_SECRET='SECRET_HERE'
@@ -21,33 +30,66 @@ class Chapter(object):
         return "Chapter(author='%s', series='%s', title='%s', url='%s')" % (self.author, self.series, self.title, self.url)
 
 
-def get_hfy_etree():
-    hfy_all_html = REDDIT.subreddit('hfy').wiki['ref/universes/jenkinsverse/all_works'].content_html
+def get_hfy_etree(url):
+    wiki_ref = url.split("wiki/")[1].rstrip().rstrip("/")
+    print(wiki_ref)
+    hfy_all_html = REDDIT.subreddit('hfy').wiki[wiki_ref].content_html
     hfy_all_html = hfy_all_html.replace(u'\u2019', u"'")
     hfy_all_html = hfy_all_html.replace(u'\u2013', u"-")
     return etree.fromstring(hfy_all_html)
 
 
-tree = get_hfy_etree()
+user_url=''
+if len(sys.argv) == 2:
+    user_url = sys.argv[1]
+else:
+    print("""
+Enter a wiki URL as the first and only argument, it is used to get the list of items.  Try one of these:
+
+          https://www.reddit.com/r/HFY/wiki/ref/universes/jenkinsverse/chronological_reading_order/
+
+          https://www.reddit.com/r/HFY/wiki/ref/universes/jenkinsverse/timeline_reading_order/
+
+          https://www.reddit.com/r/HFY/wiki/ref/universes/jenkinsverse/all_works/
+
+NOTE: The all_works option WILL NOT WORK CORRECTLY because it, for
+example, lists only part 1/4 of "Baptisms", meaning you'll miss a
+bunch of content.  I'm not fixing it because it's going to be real
+work and I have no interest in making an all_works book, but if you
+do, feel free to ping robinleepowell@gmail.com if you need help.
+
+""")
+    sys.exit(1)
+
+user_url_slug = user_url.rstrip().rstrip('/').split('/')[-1]
+
+tree = get_hfy_etree(user_url)
 all_chapters = []
-# get all links that are bold (canon works only)
-for link in tree.xpath("//div[contains(@class, 'wiki')]/ul/li/strong"):
+# get all links
+for a_tag in tree.xpath("//a"):
+    # print(etree.tostring(a_tag, pretty_print=True, encoding="utf-8").decode("utf-8"))
+    if '/wiki/' in a_tag.attrib['href'] and 'Origins' not in a_tag.text:
+        # print("SKIPPING")
+        continue
+    if 'http' not in a_tag.attrib['href']:
+        # print("SKIPPING")
+        continue
+
     c = Chapter()
 
-    a_tag = link.xpath('.//a')[0]
     c.title = a_tag.text
     c.url = a_tag.attrib['href']
-    if link.text:
-        c.title = link.text + c.title
 
     all_chapters.append(c)
 
 for c in all_chapters:
     # Detect correct series per chapter
+
+    # The default
+    c.series = "The Deathworlders"
+
     if 'Kevin Jenkins Experience' in c.title:
         c.series = 'The Deathworlders'
-    if c.title[0].isdigit():
-        c.series = "The Deathworlders"
     if "Humans don't Make Good Pets" in c.title:
         c.series = "Humans don't Make Good Pets"
         c.title = c.title.replace("Humans don't Make Good Pets ", "")
@@ -60,6 +102,7 @@ for c in all_chapters:
     if "The Lost Minstrel" in c.title:
         c.series = "The Lost Minstrel"
         c.title = c.title.replace("The Lost Minstrel - ", "")
+        c.title = c.title.replace("The Lost Minstrel -", "")
     if c.title.startswith('MIA'):
         c.series = "MIA"
         c.title = c.title.replace("MIA - ", "")
@@ -84,6 +127,8 @@ for c in all_chapters:
     if "Monkeys Reaches Stars" in c.title:
         c.series = "Xiu Chang Saga"
     if "The Tiger's Cub" in c.title:
+        c.series = "Xiu Chang Saga"
+    if "The Tigers Cub" in c.title:
         c.series = "Xiu Chang Saga"
     if "Rat in Sheep's Clothing" in c.title:
         c.series = "Xiu Chang Saga"
@@ -111,8 +156,24 @@ for c in all_chapters:
 
 
     # Store reference to Deathworlders: Warhorse. This needs to be replaced by 6 new ones
-    if c.title == "22: Warhorse" and c.series == "The Deathworlders":
+    if "Warhorse" in c.title and c.series == "The Deathworlders":
         warhorse_chapter = c
+
+    # Similar situation for Origins
+    if "Deathworld Origins 1-8" in c.title and c.series == "Deathworld Origins":
+        origins_chapter = c
+
+    # Deal with un-follow-able URLs; this is silly, better would be
+    # to update the wiki, but that seems like a silly request to
+    # make too
+    if 'redd.it/2s100t' in c.url:
+        c.url = 'https://www.reddit.com/r/HFY/comments/2s100t/oc_humans_dont_make_good_pets_xxiii/'
+    if 'redd.it/2sddv4' in c.url:
+        c.url = 'https://www.reddit.com/r/HFY/comments/2sddv4/oc_humans_dont_make_good_pets_xxiv/'
+    if 'redd.it/2t5gfl' in c.url:
+        c.url = 'https://www.reddit.com/r/HFY/comments/2t5gfl/oc_humans_dont_make_good_pets_xxv/'
+    if 'redd.it/2u4hpo' in c.url:
+        c.url = 'https://www.reddit.com/r/HFY/comments/2u4hpo/oc_humans_dont_make_good_pets_xxvi/'
 
 
 # Remove art links
@@ -126,8 +187,9 @@ for c in to_remove:
 
 # Fetch all Deathworlders titles + series
 deathworlders = []
-for i in range(1,11):
-    #FIXME: auto-detect how many pages there are
+# FIXME: auto-detect how many pages there are; 25 is *way* more than
+# the current (March 2025) count of 15, though, so it should be fine
+for i in range(1,25):
     if i == 1:
         page = requests.get('https://deathworlders.com/')
     else:
@@ -145,7 +207,6 @@ for i in range(1,11):
         c.url = 'https://deathworlders.com' + a_tag.attrib['href']
         deathworlders.append(c)
 
-
 # Splice in Warhorse chapters
 warhorse_chapters_dw = []
 for c in deathworlders:
@@ -155,12 +216,31 @@ warhorse_chapters_dw.reverse()
 loc = all_chapters.index(warhorse_chapter)
 all_chapters = all_chapters[0:loc] + warhorse_chapters_dw + all_chapters[loc+1:]
 
+origins_chapters = []
+page = requests.get('https://web.archive.org/web/20180610041631/http://captainmeta4.me/books/deathworld_origins/')
+
+page_text = page.text
+page_text = page_text.replace(u"\u2014", "-")
+page_text = page_text.replace(u"\u2019", "'")
+
+tree = etree.HTML(page_text)
+for a_tag in tree.xpath("//section//li/a"):
+    c = Chapter()
+    c.series = "Deathworld Origins"
+    c.title = a_tag.text
+    c.url = 'https://web.archive.org/web/20180610041631/http://captainmeta4.me/books/deathworld_origins/' + a_tag.attrib['href']
+    origins_chapters.append(c)
+
+# Splice in Origins chapters
+loc = all_chapters.index(origins_chapter)
+all_chapters = all_chapters[0:loc] + origins_chapters + all_chapters[loc+1:]
+
 for c in all_chapters:
     if c.series == 'The Deathworlders':
         for dw in deathworlders:
             if dw.series == 'The Deathworlders':
-                dw_title = dw.title.split(":", 1)[1].strip()
-                if dw_title.lower() in c.title.lower():
+                dw_title = dw.title.split(":", 1)[1]
+                if slugify(dw_title.lower()) in slugify(c.title.lower()):
                     c.url = dw.url
     if c.series == "Waters of Babylon":
         c.title = c.title.replace(".", "")
@@ -170,52 +250,79 @@ for c in all_chapters:
                 if dw.title.lower() in c.title.lower():
                     c.url = dw.url
 
+# Stick missing chapters of the main series, if any, at the end
+missing_chapters = []
+for c in reversed(deathworlders):
+    if c.series == "The Deathworlders":
+        found = False
+        for ac in all_chapters:
+            if ac.series == "The Deathworlders":
+                if ac.url == c.url:
+                    found=True
+                    break
 
-# First part of 'Good Training'
-for c in all_chapters:
-    if c.series == "Good Training" and c.title == "Good Training":
-        gt = c
-gt_chapters_dw = []
-for c in deathworlders:
-    if c.series == "Good Training" and "Chapter" in c.title:
-        gt_chapters_dw.append(c)
-loc = all_chapters.index(gt)
-all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
+        if not found:
+            # Two interludes are known to not match but also
+            # known to be present
+            if "chapter-22.5-interlude-outlets" in c.url or "chapter-21.5-interlude-d4-d5-c4-dxc4" in c.url:
+                continue
 
-# Good Training: The Champions
-for c in all_chapters:
-    if c.series == "Good Training" and c.title == "The Champions":
-        gt = c
-gt_chapters_dw = []
-for c in deathworlders:
-    if c.series == "Good Training: the Champions Part I":
-        gt_chapters_dw.append(c)
-loc = all_chapters.index(gt)
-all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
+            c.title = c.title.split(": ", 1)[1]
+            # print("not found")
+            # print(c)
+            all_chapters.append(c)
 
-# Good Training: The Champions part 2
-for c in all_chapters:
-    if c.series == "Good Training" and c.title == "The Champions Part 2":
-        gt = c
-gt_chapters_dw = []
-for c in deathworlders:
-    if c.series == "Good Training: the Champions Part II":
-        gt_chapters_dw.append(c)
-loc = all_chapters.index(gt)
-all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
+# This might be necessary on the all_works page?
+#
+# # First part of 'Good Training'
+# for c in all_chapters:
+#     if c.series == "Good Training" and "Good Training" in c.title and "Champions" not in c.title:
+#         gt = c
+# gt_chapters_dw = []
+# for c in deathworlders:
+#     if c.series == "Good Training" and "Chapter" in c.title:
+#         gt_chapters_dw.append(c)
+# loc = all_chapters.index(gt)
+# all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
+# 
+# # Good Training: The Champions
+# for c in all_chapters:
+#     if c.series == "Good Training" and "Good Training Champions 1" in c.title:
+#         gt = c
+# gt_chapters_dw = []
+# for c in deathworlders:
+#     if c.series == "Good Training: the Champions Part I":
+#         gt_chapters_dw.append(c)
+# loc = all_chapters.index(gt)
+# all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
+# 
+# # Good Training: The Champions part 2
+# for c in all_chapters:
+#     if c.series == "Good Training" and "Good Training Champions 2" in c.title:
+#         gt = c
+# gt_chapters_dw = []
+# for c in deathworlders:
+#     if c.series == "Good Training: the Champions Part II":
+#         gt_chapters_dw.append(c)
+# loc = all_chapters.index(gt)
+# all_chapters = all_chapters[0:loc] + gt_chapters_dw + all_chapters[loc+1:]
 
-# Deathworld Origins
-for c in all_chapters:
-    if c.series == "Deathworld Origins":
-        c.url = "https://captainmeta4.me/books/deathworld_origins/" + c.title
+# # Deathworld Origins
+# for c in all_chapters:
+#     if c.series == "Deathworld Origins":
+#         c.url = "https://captainmeta4.me/books/deathworld_origins/" + c.title
 
-# Filter duplicate urls
-prev_url = None
+# Filter duplicate urls; this will effectively prune multi-part
+# Deathworlders entries that are a single part on the main website
+prev = None
 to_delete = []
 for c in all_chapters:
-    if prev_url and c.url == prev_url:
+    if prev and c.url == prev.url:
+        # Clean up the name of the first chapter to remove like
+        # "(part 1/2)" at the end
+        prev.title = prev.title.split("(")[0].rstrip()
         to_delete.append(c)
-    prev_url = c.url
+    prev = c
 for c in to_delete:
     all_chapters.remove(c)
 
@@ -263,7 +370,7 @@ for c in all_chapters:
 # Create spec file
 header = \
 """{
-    "title": "Humanity - Fuck Yeah! - Canon",
+    "title": "Humanity - Fuck Yeah! - SLUGHERE",
     "creator": "Hambone, guidosbestfriend, hume_reddit, Rantarian, GoingAnywhereButHere, doules1071, ctwelve, slice_of_pi, captainmeta4",
     "filters": {
         "reddit": [
@@ -326,11 +433,13 @@ header = \
                 "finalize"
         ]
     },
-    "filename": "Humanity - Fuck Yeah - Canon",
+    "filename": "Humanity - Fuck Yeah - SLUGHERE",
     "output": ["epub", "latex", "html"],
     "contents":
     [
 """
+
+header = header.replace('SLUGHERE', user_url_slug)
 
 footer = \
 """
@@ -347,10 +456,12 @@ spec_chapter = \
         }
 """
 
-spec_file = open('HFY_Canon.spec', 'w')
+# Base the file name on the last part of the URL
+spec_file = open('HFY_' + user_url_slug + '.spec', 'w')
 spec_file.write(header)
 chapter_list = []
 for c in all_chapters:
+    print("Adding " + c.title + " from " + c.series + " at " + c.url)
     if 'deathworlders.com' in c.url:
         chapter_list.append(spec_chapter % (c.series + ": " + c.title, "hfy-archive", c.url))
     elif c.series == "Humans don't Make Good Pets":
@@ -364,7 +475,8 @@ for c in all_chapters:
     elif c.series == "Deathworld Origins":
         chapter_list.append(spec_chapter % (c.series + ": " + c.title, "deathworld-origins", c.url))
     else:
-        chapter_list.append(spec_chapter % (c.series + ": " + c.title, "reddit", c.url))
+        if c.series:
+            chapter_list.append(spec_chapter % (c.series + ": " + c.title, "reddit", c.url))
 
 spec_file.write(",\n".join(chapter_list))
 spec_file.write(footer)
